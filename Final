@@ -1,0 +1,311 @@
+#Import pandas and numpy for data analysis
+import pandas as pd
+import numpy as np
+
+#Import Seaborn and Matplotlib for data visualization
+import seaborn as sns
+import matplotlib.pyplot as plt
+import plotly.express as px
+from plotly.subplots import make_subplots
+import plotly.graph_objs as go
+
+#Regular Expressions
+import re
+
+#Warning Messages Control
+import warnings
+warnings.filterwarnings('ignore')
+
+#Handle Date Time Convertions between pandas and matplotlib
+from pandas.plotting import register_matplotlib_converters
+register_matplotlib_converters()
+
+# Use white grid plot background from seaborn
+sns.set(font_scale=1.5, style="whitegrid")
+
+#We are using the Bayesian Method 
+plt.style.use('bmh')
+
+#We automatically generate the EDA using the Pandas_profiling package
+import pandas_profiling
+
+##This gives the maximum columns in a pandas dataFrame. Sometimes pandas will hide columns. 
+pd.set_option('max_columns', 100)
+
+#Import plays and game data
+plays = pd.read_csv('/kaggle/input/nfl-big-data-bowl-2021/plays.csv')
+games = pd.read_csv('/kaggle/input/nfl-big-data-bowl-2021/games.csv')
+players=pd.read_csv('../input/nfl-big-data-bowl-2021/players.csv')
+
+#Section 1 - #Correcting, Completing, Creating, and Converting
+
+def ProcessPlays(df):
+    
+    #Return df if the function has been executed
+    if 'Blitz'in df:
+        return df 
+    
+    ##############################################################
+    #Blitz
+    #Categorize if it is a blitz
+    df['Blitz'] = np.where(df['numberOfPassRushers']>4, 1,0)
+    
+    ##############################################################
+    #Personnel
+    df.dropna(subset=['personnelO','personnelD'])  #lot of missing records in the end
+    
+    #Offense Team Formation using 'personnelO' column 
+    temp = df['personnelO'].str.split(',',n = 2, expand = True)
+    df['Off_RB'] = temp[0].str.split(' ',n = 1, expand = True)[0]
+    df['Off_TE'] = temp[1].str.split(' ',n = 2, expand = True)[1]
+    df['Off_WR'] = temp[2].str.split(' ',n = 2, expand = True)[1]
+
+    #Defense Team Formation using 'personnelD' column
+    temp2 = df['personnelD'].str.split(',',n = 2, expand = True)
+    df['Def_DL'] = temp2[0].str.split(' ',n = 1, expand = True)[0]
+    df['Def_LB'] = temp2[1].str.split(' ',n = 2, expand = True)[1]
+    df['Def_DB'] = temp2[2].str.split(' ',n = 2, expand = True)[1]
+    
+    return df
+
+plays = ProcessPlays(plays)
+
+#Defense Success
+
+def DefenseSuccess(df):
+    #Return df if the function has been executed
+    if 'Defense_Success'in df:
+        return df 
+    
+    #use 'passResult' 
+    df['Defense_Success'] = np.where(df['passResult'] != 'C',1,0 )
+
+    #fourth down - playResult < yardsToGo
+    df['Defense_Success'].loc[(df['yardsToGo'] > df['playResult']) &  (df['down']==4 )] = 1
+    
+    #At least 3.5 yards per play
+    df['Defense_Success'].loc[(df['playResult']<3.5) &  (df['down']!=4 )] = 1
+
+    return df
+
+plays = DefenseSuccess(plays)
+
+def AdditionalCleaning(df):
+    
+    #Return df if the function has been executed
+    if not 'playDescription'in df:
+        return df 
+    
+    #Section 3 - Additional Cleaning 
+    
+    #gameClock - Fill in Missing Values
+    
+    na_clock = df[df.gameClock.isnull()]
+    na_clock['TimeFromDesc'] = na_clock['playDescription'].str.split(' ',n = 1, expand = True)[0]
+    na_clock['TimeFromDesc'] =  na_clock['TimeFromDesc'].str[1::].str[:-1]
+    na_clock['TimeFromDesc'] = na_clock['TimeFromDesc'].str.split(':')
+    na_clock.loc[:,'mm'] = na_clock['TimeFromDesc'].map(lambda x:x[0]).str.zfill(2)
+    na_clock.loc[:,'ss'] = na_clock['TimeFromDesc'].map(lambda x:x[1]).str.zfill(2)
+    na_clock['gameClock'] = na_clock['mm'].astype(str) +':' + na_clock['ss'].astype(str) + ':00'
+    df['gameClock'].loc[df['gameClock'].isnull()] = na_clock['gameClock']
+
+    #change gameClock to 'SecondsToEndQuar' (How many seconds left till the end of the current quarter)
+    
+    df['mm'] = df.gameClock.str[:2]
+    df['ss'] = df.gameClock.str[3:5]
+    df['SecondsToEndofQuar'] = 15*60 - (df['mm'].astype(int)*60 +df['ss'].astype(int))
+    
+    #drop the unnecesaary cols
+    df.drop(['mm','ss','gameClock'],axis=1, inplace=True)
+    
+    ##############################################################
+    #possessionTeam and yardlineSide --- too much categories.
+    #add a column to define if possessionTeam == yardlineSide
+    df['PossYardlineSameSide'] = 1
+    df['PossYardlineSameSide'].loc[df['possessionTeam']!=df['yardlineSide']] = 0
+    
+    #df.drop(['possessionTeam','yardlineSide'],axis=1, inplace=True)
+    
+    ##############################################################
+    #offenseFormation fillna (141 records) based on distribution. 
+    OffFor_Dist = df.offenseFormation.value_counts(normalize = True)
+    OffFor_na = df['offenseFormation'].isnull()
+    df.loc[OffFor_na,'offenseFormation'] = np.random.choice(OffFor_Dist.index,size = len(df[OffFor_na]),p=OffFor_Dist.values)    
+    
+    ##############################################################
+    #typeDropback - fill in missing values
+    # array(['TRADITIONAL', 'SCRAMBLE_ROLLOUT_LEFT', 'DESIGNED_ROLLOUT_LEFT', 'SCRAMBLE_ROLLOUT_RIGHT', 'DESIGNED_ROLLOUT_RIGHT', 'SCRAMBLE','UNKNOWN', nan], dtype=object)
+    df['typeDropback'].loc[df.typeDropback == 'UNKNOWN'] = np.nan
+    DropbackDist = df.typeDropback.value_counts(normalize = True)
+    Dropback_na = df['typeDropback'].isnull()
+    df.loc[Dropback_na,'typeDropback'] = np.random.choice(DropbackDist.index,size = len(df[Dropback_na]),p=DropbackDist.values)    
+    
+    ##############################################################
+    #drop na
+    df.dropna(how = "any", inplace = True)
+    ##############################################################
+    #Change from object to int
+    df['Off_RB'] = df['Off_RB'].astype(int)
+    df['Off_TE'] = df['Off_TE'].astype(int)
+    df['Off_WR'] = df['Off_WR'].astype(int)
+    df['Def_DL'] = df['Def_DL'].astype(int)
+    df['Def_LB'] = df['Def_LB'].astype(int)
+    df['Def_DB'] = df['Def_DB'].astype(int)
+    
+    
+    ##############################################################
+    #drop some of the columns; 
+    df.drop(['playDescription',
+             'playType',
+             #'typeDropback',
+             #'preSnapVisitorScore',
+             #'preSnapHomeScore',
+             #'numberOfPassRushers',  
+             'penaltyCodes',         #-Remove -- "result"
+             'penaltyJerseyNumbers', #-player
+             'epa',
+             #,'offenseFormation',
+             'personnelO',
+             'personnelD',
+             #'passResult',           #-Remove -- "result" 
+             #'offensePlayResult',    #-Remove -- "result" 
+             'playResult',           #-Remove -- "result" 
+             'isDefensivePI',        #-Remove -- "result" 
+             #'Blitz',               
+             #'gameId',             
+             'playId'                #-Remove -- id column
+            ],axis=1, inplace=True)
+    return df
+
+plays = AdditionalCleaning(plays)
+
+#down
+df1 = pd.DataFrame(plays.groupby(['down'])['Defense_Success'].mean())
+df1['Defense_Fail'] = 1-df1['Defense_Success']
+df1 = df1.reset_index()
+
+#plot figure
+df1.plot(x="down", y=["Defense_Fail", "Defense_Success"], kind="bar")
+plt.legend(loc='upper left', bbox_to_anchor=(1, 0.5))
+plt.title("Down v.s. Defense Success Rate")
+
+#offenseFormation
+df2 = pd.DataFrame(plays.groupby(['offenseFormation'])['Defense_Success'].mean())
+df2['Defense_Fail'] = 1-df2['Defense_Success']
+df2 = df2.reset_index()
+
+#Plot
+df2.plot(x="offenseFormation", y=["Defense_Fail", "Defense_Success"], kind="bar")
+plt.legend(loc='upper left', bbox_to_anchor=(1, 0.5))
+plt.title("Offensive Formation v.s. Defense Success Rate")
+plt.xlabel("Offensive Formation")
+
+#numberOfPassRushers
+df3 = pd.DataFrame(plays.groupby(['numberOfPassRushers'])['Defense_Success'].mean())
+df3['Defense_Fail'] = 1-df3['Defense_Success']
+df3 = df3.reset_index()
+
+#Remove 1 and 8 to avoid confusion
+df3 = df3[2:8]
+
+#Plot
+df3.plot(x="numberOfPassRushers", y=["Defense_Fail", "Defense_Success"], kind="bar")
+plt.legend(loc='upper left', bbox_to_anchor=(1, 0.5))
+plt.title("Number of PassRushers v.s. Defense Success Rate")
+plt.xlabel("Number of PassRushers")
+
+gameTeam = games[['gameId','homeTeamAbbr','visitorTeamAbbr','week']]
+#Merge to get the Defense Team
+game_play = plays.merge(gameTeam,on='gameId')
+game_play = game_play[['possessionTeam','homeTeamAbbr','visitorTeamAbbr','week','Blitz']]
+game_play['DefenseTeam'] = 'temp'
+game_play['DefenseTeam'].loc[game_play.possessionTeam == game_play.homeTeamAbbr] = game_play.visitorTeamAbbr
+game_play['DefenseTeam'].loc[game_play.possessionTeam != game_play.homeTeamAbbr] = game_play.possessionTeam
+#Plot the percentage of Blitz for each team
+fig, ax = plt.subplots(figsize = (12,3))
+game_play.groupby(['DefenseTeam'])['Blitz'].mean().plot(kind = 'bar')
+ax.set_title('% of Blitz for Each Team')
+
+#Def_DB
+df5 = pd.DataFrame(plays.groupby(['Def_DB'])['Defense_Success'].mean())
+df5['Defense_Fail'] = 1-df5['Defense_Success']
+df5= df5.reset_index()
+#Remove DB = 2 to avoid confusion
+df5 = df5[1:]
+#Plot
+df5.plot(x="Def_DB", y=["Defense_Fail", "Defense_Success"], kind="bar")
+plt.legend(loc='upper left', bbox_to_anchor=(1, 0.5))
+plt.title("Number of Defensive Backs v.s. Defense Success Rate")
+plt.xlabel("Number of Defensive Backs")
+
+#SecondsToEndofQuar
+sns.distplot(plays[plays.Defense_Success == 0].SecondsToEndofQuar)
+sns.distplot(plays[plays.Defense_Success == 1].SecondsToEndofQuar) 
+plt.title("Seconds Left In Quarter v.s. Defense Success Rate"
+
+
+#Pandas Profiling for Games
+report_game = pandas_profiling.ProfileReport(games)
+
+#Display the Report
+display(report_game)
+
+#Pandas Profiling for Players
+report_players=pandas_profiling.ProfileReport(players)
+
+#Display the Report
+display(report_players
+
+#Pandas Profiling for Plays
+report_plays = pandas_profiling.ProfileReport(plays)
+
+#Display the Report
+display(report_plays)
+
+##Create a new DataFrame with visitor team names
+visitor_team_names = games.visitorTeamAbbr.sort_values().unique()
+df_visitor_team_names=pd.DataFrame(visitor_team_names, columns=['team'])
+
+##Create a new DataFrame with home team names
+home_team_names = games.homeTeamAbbr.sort_values().unique()
+df_home_team_names=pd.DataFrame(home_team_names)
+
+#Identify the shape of the plays dataset
+plays.shape
+
+#Return  the mean number of defenders in the box given that the pass result is a 'Sack'  
+plays.groupby(plays['passResult']=='S')['defendersInTheBox'].mean()
+
+#Return the median number of defenders in the box if the pass result is a sack. 
+plays.groupby(plays['passResult']=='S')['defendersInTheBox'].median()
+
+#Return the number of Pass Rushers by the pass result
+plays.groupby(by=plays['passResult'] == 'S')['numberOfPassRushers'].value_counts()
+
+#Return the mean number of Pass Rushers grouped by Pass Result
+plays.groupby('passResult', as_index=False)['numberOfPassRushers'].mean()
+
+#Return the median Number of Pass Rushers grouped by Pass Result
+plays.groupby('passResult', as_index=False)['numberOfPassRushers'].median()
+
+#Create a list of offensive, defensive, and special team roles
+cat_item = {'Offense': ['QB', 'RB', 'FB', 'WR', 'TE', 'HB'], 
+            'Defense': ['OLB', 'MLB', 'LB', 'ILB', 'CB', 'DE', 'DT', 'NT', 'DB', 'S', 'SS', 'FS'], 
+            'Special': ['K', 'P', 'LS']}
+item_cat = {w: k for k, v in cat_item.items() for w in v}
+
+#We are mapping the positions that we have defined to the team_role column. 
+players['team_role'] = players['position'].map(item_cat)
+
+from plotly.offline import plot, iplot, init_notebook_mode
+import plotly.graph_objs as go
+init_notebook_mode(connected=True)
+#distribution based on team weight
+defense_height_weight_distribution = px.scatter(data_frame = players[players['team_role'] == 'Defense'], x = 'weight', y = 'height', 
+                                        color="position", symbol = 'position',
+                                        color_discrete_map ={"Defense": "red"},
+                                        marginal_x = 'histogram', marginal_y = 'box',
+                                        labels = {'position': 'team they are playing in:'})
+
+
+defense_height_weight_distribution.update_layout(autosize = False, width =1200, height =600)
